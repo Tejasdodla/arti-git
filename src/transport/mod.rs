@@ -1,8 +1,12 @@
 mod http;
 mod tor;
+mod gix_tor;
+mod registry;
 
 pub use http::HttpConnection;
 pub use tor::{TorConnection, AsyncRemoteConnection};
+pub use gix_tor::{TorTransport, TorGixConnection, TorTransportError, create_tor_transport};
+pub use registry::{ArtiGitTransportRegistry, create_transport_registry};
 
 use crate::core::{Result, ObjectId, ObjectType};
 

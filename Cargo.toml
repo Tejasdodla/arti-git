@@ -2,10 +2,17 @@
 name = "arti-git"
 version = "0.1.0"
 edition = "2021"
-description = "Decentralized, anonymous Git infrastructure using Arti"
+description = "Decentralized, anonymous Git infrastructure using Arti and gitoxide"
 authors = ["ArtiGit Team"]
 
 [dependencies]
+# Core Git functionality from gitoxide
+gix = "0.42.0"          # High-level Git interface
+gix-protocol = "0.26.3" # For Git protocol implementation
+gix-transport = "0.25.4"# For Git transport protocols
+gix-url = "0.13.2"      # For Git URL handling
+gix-config = "0.16.2"   # For Git configuration
+
 # Core functionality
 bytes = "1.4.0"
 thiserror = "1.0.40"
@@ -21,9 +28,14 @@ tokio = { version = "1.28.0", features = ["full"] }
 # For CLI interface
 clap = { version = "4.2.4", features = ["derive"] }
 
+# Configuration handling
+config = "0.13.3"
+dirs = "5.0.1"
+
 # Will be used later for API integrations
 serde = { version = "1.0.160", features = ["derive"] }
 serde_json = "1.0.96"
+toml = "0.7.3"
 
 # Networking and HTTP
 reqwest = { version = "0.11.20", features = ["json", "stream", "blocking"] }
@@ -38,6 +50,10 @@ tor-rtcompat = { version = "0.9.0", features = ["tokio"] }
 ed25519-dalek = "1.0.1"
 rand = "0.7.3"
 base64 = "0.21.0"
+
+# IPFS integration
+ipfs-api-backend-hyper = "0.6.0"  # IPFS HTTP API client
+home = "0.5.4"                     # For resolving home directory
 
 [dev-dependencies]
 rstest = "0.17.0"
