@@ -1,73 +1,83 @@
 use std::io::{self, Read, Write};
 use bytes::Bytes;
+use url::Url;
 
 use crate::core::{GitError, Result, ObjectId, ObjectType, RemoteConnection};
-use super::Transport;
 
-/// HTTP connection for Git transport
+/// HTTP connection for Git operations
 pub struct HttpConnection {
     url: String,
     user_agent: String,
     capabilities: Vec<String>,
+    client: reqwest::blocking::Client,
 }
 
 impl HttpConnection {
     /// Create a new HTTP connection
-    pub fn new(url: &str) -> Self {
-        Self {
-            url: url.to_string(),
-            user_agent: "arti-git/0.1.0".to_string(),
+    pub fn new(url: &str) -> Result<Self> {
+        let parsed_url = Url::parse(url)
+            .map_err(|e| GitError::Transport(format!("Invalid URL: {}", e)))?;
+            
+        Ok(Self {
+            url: parsed_url.to_string(),
+            user_agent: format!("arti-git/{}", env!("CARGO_PKG_VERSION")),
             capabilities: Vec::new(),
-        }
+            client: reqwest::blocking::Client::new(),
+        })
     }
     
-    /// Get the repository URL
+    /// Get the URL of the remote
     pub fn url(&self) -> &str {
         &self.url
     }
-}
-
-impl Transport for HttpConnection {
-    fn list_refs(&mut self) -> Result<Vec<(String, ObjectId)>> {
-        // In a real implementation, we would make an HTTP request to
-        // the URL + "/info/refs?service=git-upload-pack"
-        // and parse the response to get the list of refs.
-        // For now, return an empty list as this is just a placeholder.
-        
-        Ok(Vec::new())
-    }
     
-    fn fetch(&mut self, wants: &[ObjectId], haves: &[ObjectId]) -> Result<Vec<(ObjectType, Vec<u8>)>> {
-        // In a real implementation, we would:
-        // 1. Make an HTTP request to the URL + "/git-upload-pack" with the wants and haves
-        // 2. Parse the response to get the packfile
-        // 3. Extract the objects from the packfile
-        // For now, return an empty list as this is just a placeholder.
+    /// Discover references and capabilities from the remote
+    fn discover_refs(&mut self) -> Result<Vec<(String, ObjectId)>> {
+        let mut url = self.url.clone();
+        if !url.ends_with("/info/refs") {
+            url = format!("{}{}info/refs?service=git-upload-pack", 
+                url, 
+                if url.ends_with('/') { "" } else { "/" }
+            );
+        }
         
+        // Send request to get refs and capabilities
+        let response = self.client.get(&url)
+            .header("User-Agent", &self.user_agent)
+            .send()
+            .map_err(|e| GitError::Transport(format!("HTTP request failed: {}", e)))?;
+            
+        if !response.status().is_success() {
+            return Err(GitError::Transport(format!(
+                "HTTP error: {} ({})", 
+                response.status().as_u16(), 
+                response.status().to_string()
+            )));
+        }
+        
+        // Parse response (for now, return empty list)
+        // TODO: Implement proper smart HTTP protocol parsing
         Ok(Vec::new())
-    }
-    
-    fn push(&mut self, objects: &[(ObjectType, Vec<u8>)], refs: &[(String, ObjectId)]) -> Result<()> {
-        // In a real implementation, we would:
-        // 1. Package the objects into a packfile
-        // 2. Make an HTTP request to the URL + "/git-receive-pack" with the packfile
-        // 3. Parse the response to check for errors
-        // For now, return success as this is just a placeholder.
-        
-        Ok(())
     }
 }
 
 impl RemoteConnection for HttpConnection {
-    fn fetch_objects(&mut self, wants: &[ObjectId], haves: &[ObjectId]) -> Result<Vec<(ObjectType, ObjectId, Bytes)>> {
-        // This would be implemented to support the RemoteConnection trait
-        // For now, return an empty vector
+    fn list_refs(&mut self) -> Result<Vec<(String, ObjectId)>> {
+        self.discover_refs()
+    }
+    
+    fn fetch_objects(&mut self, wants: &[ObjectId], haves: &[ObjectId]) 
+        -> Result<Vec<(ObjectType, ObjectId, bytes::Bytes)>> {
+        
+        // Implement smart HTTP protocol for fetching
+        // For now, return empty list
+        // TODO: Implement fetch protocol
         Ok(Vec::new())
     }
     
-    fn push_objects(&mut self, objects: &[(ObjectType, ObjectId, Bytes)]) -> Result<()> {
-        // This would be implemented to support the RemoteConnection trait
-        // For now, return success
+    fn push_objects(&mut self, objects: &[(ObjectType, ObjectId, bytes::Bytes)], refs: &[(String, ObjectId)]) -> Result<()> {
+        // Implement smart HTTP protocol for pushing
+        // TODO: Implement push protocol
         Ok(())
     }
 }
