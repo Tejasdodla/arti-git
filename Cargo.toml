@@ -1,0 +1,30 @@
+[package]
+name = "arti-git"
+version = "0.1.0"
+edition = "2021"
+description = "Decentralized, anonymous Git infrastructure using Arti"
+authors = ["ArtiGit Team"]
+
+[dependencies]
+# Core functionality
+bytes = "1.4.0"
+thiserror = "1.0.40"
+hex = "0.4.3"
+sha1 = "0.10.5"
+flate2 = "1.0.25"
+tempfile = "3.5.0"
+chrono = "0.4.24"
+
+# Async runtime
+tokio = { version = "1.28.0", features = ["full"] }
+
+# For CLI interface
+clap = { version = "4.2.4", features = ["derive"] }
+
+# Will be used later for API integrations
+serde = { version = "1.0.160", features = ["derive"] }
+serde_json = "1.0.96"
+
+[dev-dependencies]
+rstest = "0.17.0"
+assert_fs = "1.0.13"
