@@ -25,6 +25,10 @@ pub enum GitError {
     NotImplemented(String),
     /// Configuration errors
     Config(String),
+    /// LFS errors
+    LfsError(String),
+    /// IPFS errors
+    IpfsError(String),
 }
 
 impl fmt::Display for GitError {
@@ -39,6 +43,8 @@ impl fmt::Display for GitError {
             GitError::InvalidArgument(msg) => write!(f, "Invalid argument: {}", msg),
             GitError::NotImplemented(msg) => write!(f, "Not implemented: {}", msg),
             GitError::Config(msg) => write!(f, "Configuration error: {}", msg),
+            GitError::LfsError(msg) => write!(f, "LFS error: {}", msg),
+            GitError::IpfsError(msg) => write!(f, "IPFS error: {}", msg),
         }
     }
 }

@@ -4,6 +4,7 @@ use thiserror::Error;
 
 use arti_client::TorClientConfig;
 use crate::ipfs::IpfsConfig;
+use crate::lfs::LfsConfig;
 
 /// Configuration error type
 #[derive(Error, Debug)]
@@ -36,6 +37,10 @@ pub struct ArtiGitConfig {
     /// IPFS configuration
     #[serde(default)]
     pub ipfs: IpfsConfig,
+    
+    /// LFS configuration
+    #[serde(default)]
+    pub lfs: LfsConfig,
 }
 
 /// Tor configuration settings
@@ -115,6 +120,7 @@ impl Default for ArtiGitConfig {
             tor: TorConfig::default(),
             git: GitConfig::default(),
             ipfs: IpfsConfig::default(),
+            lfs: LfsConfig::default(),
         }
     }
 }
