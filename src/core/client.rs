@@ -1,39 +1,79 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(feature = "tor")]
 use arti_client::{TorClient, TorClientConfig};
-use gix::{Repository, open};
-use gix_url::Url;
-use gix_transport::client::{connect, capabilities};
+#[cfg(feature = "tor")]
 use tor_rtcompat::{Runtime, PreferredRuntime};
 
+use gix::{Repository, open};
+#[cfg(feature = "tor")]
+use gix_transport::client::{connect, capabilities};
+
 use crate::core::{ArtiGitConfig, GitError, Result};
+#[cfg(feature = "tor")]
 use crate::transport::{TorTransport, ArtiGitTransportRegistry, create_transport_registry};
 use crate::utils;
+#[cfg(feature = "ipfs")]
 use crate::ipfs::{IpfsClient, IpfsObjectStorage, IpfsObjectProvider};
+
+/// Workaround for the gix-url canonicalization issue
+fn canonicalize_url_path(url_str: &str) -> Result<String> {
+    // Only process file:// URLs
+    if !url_str.starts_with("file://") {
+        return Ok(url_str.to_string());
+    }
+    
+    // Extract the path portion
+    let path_part = url_str.strip_prefix("file://").unwrap_or(url_str);
+    
+    // Convert to absolute path if needed
+    let path = Path::new(path_part);
+    let abs_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| GitError::IO(format!("Failed to get current directory: {}", e)))?
+            .join(path)
+    };
+    
+    // Convert back to URL format
+    let canonical_url = format!("file://{}", abs_path.to_string_lossy());
+    Ok(canonical_url)
+}
 
 /// The main ArtiGit client that integrates Arti (Tor) with gitoxide
 pub struct ArtiGitClient {
     config: ArtiGitConfig,
+    
+    #[cfg(feature = "tor")]
     runtime: PreferredRuntime,
+    #[cfg(feature = "tor")]
     tor_client: Option<Arc<TorClient<PreferredRuntime>>>,
+    #[cfg(feature = "tor")]
     tor_transport: Option<Arc<TorTransport>>,
+    #[cfg(feature = "tor")]
     transport_registry: Option<ArtiGitTransportRegistry>,
+    #[cfg(feature = "tor")]
     transport_handle: Option<capabilities::TransportFactoryHandle>,
     
     /// IPFS client for interacting with the IPFS network
+    #[cfg(feature = "ipfs")]
     ipfs_client: Option<Arc<IpfsClient>>,
     
     /// IPFS object storage for Git objects
+    #[cfg(feature = "ipfs")]
     ipfs_storage: Option<Arc<IpfsObjectStorage>>,
 }
 
 impl ArtiGitClient {
     /// Create a new ArtiGit client using the provided configuration
     pub async fn new(config: ArtiGitConfig) -> Result<Self> {
+        #[cfg(feature = "tor")]
         let runtime = PreferredRuntime::create()
             .map_err(|e| GitError::Transport(format!("Failed to create runtime: {}", e)))?;
             
+        #[cfg(feature = "tor")]
         let tor_client = if config.tor.use_tor {
             // Configure and bootstrap Tor client
             let arti_config = config.to_arti_config()?;
@@ -48,6 +88,7 @@ impl ArtiGitClient {
         };
         
         // Create transport and registry if Tor is enabled
+        #[cfg(feature = "tor")]
         let (tor_transport, transport_registry, transport_handle) = if config.tor.use_tor {
             if let Some(client) = &tor_client {
                 // Create the Tor transport
@@ -73,6 +114,7 @@ impl ArtiGitClient {
         };
         
         // Initialize IPFS if enabled
+        #[cfg(feature = "ipfs")]
         let (ipfs_client, ipfs_storage) = if config.ipfs.enabled {
             match IpfsClient::new(config.ipfs.clone()).await {
                 Ok(client) => {
@@ -96,16 +138,33 @@ impl ArtiGitClient {
             (None, None)
         };
         
-        Ok(Self {
+        #[cfg(not(feature = "ipfs"))]
+        let _ = &config.ipfs.enabled;  // Just to use the variable
+        
+        #[cfg(feature = "tor")]
+        let client = Self {
             config,
             runtime,
             tor_client,
             tor_transport,
             transport_registry,
             transport_handle,
+            #[cfg(feature = "ipfs")]
             ipfs_client,
+            #[cfg(feature = "ipfs")]
             ipfs_storage,
-        })
+        };
+        
+        #[cfg(not(feature = "tor"))]
+        let client = Self {
+            config,
+            #[cfg(feature = "ipfs")]
+            ipfs_client,
+            #[cfg(feature = "ipfs")]
+            ipfs_storage,
+        };
+        
+        Ok(client)
     }
     
     /// Create a client with the default configuration
@@ -122,15 +181,13 @@ impl ArtiGitClient {
     
     /// Clone a repository using the appropriate transport based on the URL
     pub async fn clone(&self, url: &str, path: impl AsRef<Path>) -> Result<Repository> {
-        let url = Url::try_from(url)
-            .map_err(|e| GitError::InvalidArgument(format!("Invalid URL: {}", e)))?;
-        
-        // With our registered transport, we don't need special handling anymore
-        // The transport registry automatically selects the right transport based on URL
+        // Process the URL to make file:// URLs absolute without using gix-url's problematic method
+        let canonical_url = canonicalize_url_path(url)?;
+            
         let path = path.as_ref();
         
         // Clone using gitoxide's standard API
-        let repo = Repository::clone(url.to_string(), path)
+        let repo = Repository::clone(canonical_url, path)
             .map_err(|e| GitError::Repository(format!("Clone failed: {}", e)))?;
             
         Ok(repo)
@@ -309,16 +366,19 @@ impl ArtiGitClient {
         Ok(())
     }
     
+    #[cfg(feature = "tor")]
     /// Get the Tor client instance, if available
     pub fn tor_client(&self) -> Option<Arc<TorClient<PreferredRuntime>>> {
         self.tor_client.clone()
     }
     
+    #[cfg(feature = "tor")]
     /// Get the runtime instance
     pub fn runtime(&self) -> PreferredRuntime {
         self.runtime.clone()
     }
     
+    #[cfg(feature = "tor")]
     /// Initialize and register the Tor transport
     async fn init_transport(&mut self) -> Result<()> {
         if self.config.tor.use_tor {
@@ -352,21 +412,25 @@ impl ArtiGitClient {
         Ok(())
     }
     
+    #[cfg(feature = "ipfs")]
     /// Get the IPFS client, if available
     pub fn ipfs_client(&self) -> Option<Arc<IpfsClient>> {
         self.ipfs_client.clone()
     }
     
+    #[cfg(feature = "ipfs")]
     /// Get the IPFS object storage, if available
     pub fn ipfs_storage(&self) -> Option<Arc<IpfsObjectStorage>> {
         self.ipfs_storage.clone()
     }
     
+    #[cfg(feature = "ipfs")]
     /// Check if IPFS is enabled and available
     pub fn is_ipfs_enabled(&self) -> bool {
         self.ipfs_client.is_some() && self.ipfs_storage.is_some()
     }
     
+    #[cfg(feature = "ipfs")]
     /// Store a file in IPFS
     pub async fn store_in_ipfs(&self, path: impl AsRef<Path>) -> Result<String> {
         let client = self.ipfs_client.as_ref()
@@ -375,6 +439,7 @@ impl ArtiGitClient {
         client.add_file(path).await
     }
     
+    #[cfg(feature = "ipfs")]
     /// Store raw data in IPFS
     pub async fn store_bytes_in_ipfs(&self, data: &[u8]) -> Result<String> {
         let client = self.ipfs_client.as_ref()
@@ -383,27 +448,115 @@ impl ArtiGitClient {
         client.add_bytes(data).await
     }
     
+    #[cfg(feature = "ipfs")]
     /// Retrieve a file from IPFS by its content ID (CID)
-    pub async fn get_from_ipfs(&self, cid: &str) -> Result<Bytes> {
+    pub async fn get_from_ipfs(&self, cid: &str) -> Result<bytes::Bytes> {
         let client = self.ipfs_client.as_ref()
             .ok_or_else(|| GitError::Config("IPFS is not enabled".to_string()))?;
             
         client.get_file(cid).await
     }
     
-    /// Store a Git object in IPFS
-    pub async fn store_object_in_ipfs(&self, object_type: ObjectType, data: &[u8]) -> Result<ObjectId> {
-        let storage = self.ipfs_storage.as_ref()
-            .ok_or_else(|| GitError::Config("IPFS object storage is not enabled".to_string()))?;
+    /// Get the LFS client, if available
+    pub fn lfs_client(&self) -> Option<Arc<crate::lfs::LfsClient>> {
+        // Check if LFS is enabled in the config
+        if !self.config.lfs.enabled {
+            return None;
+        }
+        
+        // Create the LFS client on-demand if it's enabled
+        if self.config.lfs.enabled {
+            let config = self.config.lfs.clone();
             
-        storage.store_object(object_type, data).await
+            // Try to create a new LFS client
+            match crate::lfs::LfsClient::new(config) {
+                Ok(client) => {
+                    #[cfg(feature = "ipfs")]
+                    // If IPFS is configured, create the client with IPFS support
+                    if self.config.ipfs.enabled && self.config.lfs.use_ipfs {
+                        if let Some(ipfs_client) = &self.ipfs_client {
+                            if let Ok(lfs_client) = crate::lfs::LfsClient::with_ipfs(
+                                self.config.lfs.clone(),
+                                ipfs_client.clone()
+                            ) {
+                                return Some(Arc::new(lfs_client));
+                            }
+                        }
+                    }
+                    
+                    // Return the client without IPFS support
+                    Some(Arc::new(client))
+                },
+                Err(e) => {
+                    eprintln!("Warning: Failed to create LFS client: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
     }
     
-    /// Get a Git object from IPFS
-    pub async fn get_object_from_ipfs(&self, id: &ObjectId) -> Result<(ObjectType, Bytes)> {
-        let storage = self.ipfs_storage.as_ref()
-            .ok_or_else(|| GitError::Config("IPFS object storage is not enabled".to_string()))?;
-            
-        storage.get_object(id).await
+    /// Get the LFS storage backend, if available
+    pub fn lfs_storage(&self) -> Option<Arc<crate::lfs::LfsStorage>> {
+        // Check if LFS is enabled in the config
+        if !self.config.lfs.enabled {
+            return None;
+        }
+        
+        // Create the LFS storage on-demand using the configured directory
+        let base_dir = if self.config.lfs.objects_dir.is_absolute() {
+            self.config.lfs.objects_dir.clone()
+        } else {
+            // Use a default directory if not configured
+            let mut path = dirs::data_dir().unwrap_or_else(|| PathBuf::from("~/.local/share"));
+            path.push("arti-git");
+            path.push("lfs");
+            path.push("objects");
+            path
+        };
+        
+        #[cfg(feature = "ipfs")]
+        // Try to create a new LFS storage with IPFS support
+        if self.config.ipfs.enabled && self.config.lfs.use_ipfs {
+            // Create with IPFS support
+            if let Some(ipfs_client) = &self.ipfs_client {
+                match crate::lfs::LfsStorage::with_ipfs(
+                    base_dir.clone(), 
+                    ipfs_client.clone(), 
+                    self.config.lfs.ipfs_primary
+                ) {
+                    Ok(storage) => return Some(Arc::new(storage)),
+                    Err(e) => {
+                        eprintln!("Warning: Failed to create LFS storage with IPFS: {}", e);
+                        // Fall back to local-only storage
+                    }
+                }
+            }
+        }
+        
+        // Create local-only storage
+        match crate::lfs::LfsStorage::new(base_dir) {
+            Ok(storage) => Some(Arc::new(storage)),
+            Err(e) => {
+                eprintln!("Warning: Failed to create LFS storage: {}", e);
+                None
+            }
+        }
+    }
+    
+    /// Initialize Git LFS for a repository
+    pub async fn init_lfs(&self, repo_path: impl AsRef<Path>) -> Result<()> {
+        crate::lfs::configure_lfs(self, repo_path).await
+    }
+    
+    /// Track a file pattern with Git LFS
+    pub async fn lfs_track(&self, pattern: &str, repo_path: impl AsRef<Path>) -> Result<()> {
+        crate::lfs::track(self, pattern, repo_path).await
+    }
+    
+    /// Start an LFS server for serving LFS objects
+    pub async fn start_lfs_server(&self, addr: &str, base_url: &str, repo_dir: impl AsRef<Path>) -> Result<()> {
+        crate::lfs::start_server(self, addr, base_url, repo_dir).await
     }
 }

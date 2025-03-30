@@ -1,43 +1,30 @@
-use std::fmt;
+/// Git LFS pointer file implementation
+///
+/// This module provides functionality for working with Git LFS pointer files.
+/// A pointer file is a small text file that replaces a large file in a Git repository,
+/// containing metadata about the original file and where to find it.
+use std::collections::HashMap;
 use std::str::FromStr;
-use thiserror::Error;
 
-/// Error types for LFS pointer operations
-#[derive(Debug, Error)]
-pub enum LfsPointerError {
-    #[error("Missing version in LFS pointer")]
-    MissingVersion,
-    
-    #[error("Missing oid in LFS pointer")]
-    MissingOid,
-    
-    #[error("Missing size in LFS pointer")]
-    MissingSize,
-    
-    #[error("Invalid size value: {0}")]
-    InvalidSize(String),
-    
-    #[error("Invalid format in LFS pointer")]
-    InvalidFormat,
-    
-    #[error("Unsupported version: {0}")]
-    UnsupportedVersion(String),
-}
+use crate::core::{GitError, Result};
 
-/// Represents a Git LFS pointer file
+/// A Git LFS pointer file
 #[derive(Debug, Clone)]
 pub struct LfsPointer {
-    /// LFS spec version
+    /// Version string for the LFS spec
     pub version: String,
     
-    /// Object ID in the format "sha256:[hash]"
+    /// Object ID for the LFS object
     pub oid: String,
     
-    /// Size of the actual file in bytes
+    /// Size of the file in bytes
     pub size: u64,
     
-    /// Optional IPFS CID for the object
+    /// IPFS CID for the object (if stored in IPFS)
     pub ipfs_cid: Option<String>,
+    
+    /// Additional custom attributes
+    pub attributes: HashMap<String, String>,
 }
 
 impl LfsPointer {
@@ -48,82 +35,131 @@ impl LfsPointer {
             oid: oid.to_string(),
             size,
             ipfs_cid: None,
+            attributes: HashMap::new(),
         }
     }
     
-    /// Parse an LFS pointer from a string
-    pub fn parse(content: &str) -> Result<Self, LfsPointerError> {
+    /// Set the IPFS CID for this object
+    pub fn set_ipfs_cid(&mut self, cid: &str) {
+        self.ipfs_cid = Some(cid.to_string());
+        
+        // Also store in attributes for compatibility with standard LFS clients
+        self.attributes.insert("x-artigit-ipfs-cid".to_string(), cid.to_string());
+    }
+    
+    /// Parse a pointer from a string
+    pub fn parse(s: &str) -> Result<Self> {
         let mut version = None;
         let mut oid = None;
         let mut size = None;
         let mut ipfs_cid = None;
+        let mut attributes = HashMap::new();
         
-        for line in content.lines() {
+        for line in s.lines() {
             let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
             
-            if line.starts_with("version ") {
-                version = Some(line[8..].to_string());
-            } else if line.starts_with("oid ") {
-                oid = Some(line[4..].to_string());
-            } else if line.starts_with("size ") {
-                size = match line[5..].parse::<u64>() {
-                    Ok(s) => Some(s),
-                    Err(_) => return Err(LfsPointerError::InvalidSize(line[5..].to_string())),
-                };
-            } else if line.starts_with("x-ipfs-cid ") {
-                ipfs_cid = Some(line[11..].to_string());
+            // Parse key-value pairs
+            let parts: Vec<&str> = line.splitn(2, ' ').collect();
+            if parts.len() != 2 {
+                continue;
+            }
+            
+            let key = parts[0];
+            let value = parts[1];
+            
+            match key {
+                "version" => version = Some(value.to_string()),
+                "oid" => oid = Some(value.to_string()),
+                "size" => {
+                    size = value.parse::<u64>().ok();
+                }
+                "x-artigit-ipfs-cid" => {
+                    ipfs_cid = Some(value.to_string());
+                }
+                _ => {
+                    attributes.insert(key.to_string(), value.to_string());
+                }
             }
         }
         
-        let version = version.ok_or(LfsPointerError::MissingVersion)?;
-        let oid = oid.ok_or(LfsPointerError::MissingOid)?;
-        let size = size.ok_or(LfsPointerError::MissingSize)?;
-        
-        if !version.starts_with("https://git-lfs.github.com/spec/") {
-            return Err(LfsPointerError::UnsupportedVersion(version));
-        }
+        // Check required fields
+        let version = version.ok_or_else(|| GitError::LfsError("Missing version in LFS pointer".to_string()))?;
+        let oid = oid.ok_or_else(|| GitError::LfsError("Missing oid in LFS pointer".to_string()))?;
+        let size = size.ok_or_else(|| GitError::LfsError("Missing or invalid size in LFS pointer".to_string()))?;
         
         Ok(Self {
             version,
             oid,
             size,
             ipfs_cid,
+            attributes,
         })
     }
     
-    /// Get the hash part of the oid
-    pub fn hash(&self) -> String {
-        if let Some(sha_part) = self.oid.strip_prefix("sha256:") {
-            sha_part.to_string()
-        } else {
-            self.oid.clone()
+    /// Convert the pointer to a string
+    pub fn to_string(&self) -> String {
+        let mut lines = Vec::new();
+        
+        lines.push(format!("version {}", self.version));
+        lines.push(format!("oid {}", self.oid));
+        lines.push(format!("size {}", self.size));
+        
+        // Add IPFS CID if available
+        if let Some(cid) = &self.ipfs_cid {
+            lines.push(format!("x-artigit-ipfs-cid {}", cid));
         }
+        
+        // Add custom attributes
+        for (key, value) in &self.attributes {
+            // Skip the IPFS CID attribute as we've already added it
+            if key != "x-artigit-ipfs-cid" {
+                lines.push(format!("{} {}", key, value));
+            }
+        }
+        
+        lines.join("\n")
     }
     
-    /// Set the IPFS CID for this pointer
-    pub fn set_ipfs_cid(&mut self, cid: &str) {
-        self.ipfs_cid = Some(cid.to_string());
+    /// Get the URL for this pointer
+    pub fn url(&self, base_url: &str) -> String {
+        format!("{}/objects/{}", base_url, self.oid)
     }
-}
-
-impl fmt::Display for LfsPointer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "version {}", self.version)?;
-        writeln!(f, "oid {}", self.oid)?;
-        writeln!(f, "size {}", self.size)?;
-        
-        if let Some(cid) = &self.ipfs_cid {
-            writeln!(f, "x-ipfs-cid {}", cid)?;
-        }
-        
+    
+    /// Check if this pointer can use IPFS for retrieval
+    pub fn has_ipfs(&self) -> bool {
+        self.ipfs_cid.is_some()
+    }
+    
+    /// Create a pointer from a file
+    pub async fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let content = tokio::fs::read_to_string(path).await
+            .map_err(|e| GitError::LfsError(format!("Failed to read LFS pointer: {}", e)))?;
+            
+        Self::parse(&content)
+    }
+    
+    /// Write a pointer to a file
+    pub async fn write_to_file(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        tokio::fs::write(path, self.to_string()).await
+            .map_err(|e| GitError::LfsError(format!("Failed to write LFS pointer: {}", e)))?;
+            
         Ok(())
     }
 }
 
+impl std::fmt::Display for LfsPointer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_string())
+    }
+}
+
 impl FromStr for LfsPointer {
-    type Err = LfsPointerError;
+    type Err = GitError;
     
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self> {
         Self::parse(s)
     }
 }

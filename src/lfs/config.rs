@@ -1,173 +1,172 @@
-use std::path::PathBuf;
+/// LFS configuration settings
+use std::path::{Path, PathBuf};
 use serde::{Serialize, Deserialize};
 
-/// Configuration for Git LFS with IPFS integration
+/// Configuration for Git LFS functionality
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LfsConfig {
     /// Whether LFS is enabled
+    #[serde(default = "default_lfs_enabled")]
     pub enabled: bool,
     
-    /// The threshold file size in bytes to automatically track with LFS
+    /// Whether to use IPFS for storage
+    #[serde(default = "default_use_ipfs")]
+    pub use_ipfs: bool,
+    
+    /// LFS server URL
+    #[serde(default)]
+    pub url: Option<String>,
+    
+    /// Base directory for local LFS objects
+    #[serde(default = "default_lfs_dir")]
+    pub objects_dir: PathBuf,
+    
+    /// Size threshold for automatic LFS tracking (in bytes)
+    #[serde(default = "default_size_threshold")]
     pub size_threshold: u64,
     
     /// File patterns to track with LFS
+    #[serde(default)]
     pub track_patterns: Vec<String>,
     
-    /// The directory where LFS objects are stored
-    pub objects_dir: PathBuf,
+    /// Whether to pin LFS objects in IPFS
+    #[serde(default = "default_pin_objects")]
+    pub pin_objects: bool,
     
-    /// Whether to use IPFS for object storage
-    pub use_ipfs: bool,
+    /// Whether IPFS is the primary storage (if false, local storage is primary)
+    #[serde(default)]
+    pub ipfs_primary: bool,
     
-    /// The IPFS gateway URL
-    pub ipfs_gateway: Option<String>,
-    
-    /// Whether to pin objects on IPFS
-    pub ipfs_pin: bool,
+    /// Whether to automatically upload objects to IPFS when downloaded from LFS server
+    #[serde(default = "default_auto_upload")]
+    pub auto_upload_to_ipfs: bool,
+}
+
+fn default_lfs_enabled() -> bool {
+    true
+}
+
+fn default_use_ipfs() -> bool {
+    false
+}
+
+fn default_lfs_dir() -> PathBuf {
+    Path::new(".git").join("lfs").join("objects")
+}
+
+fn default_size_threshold() -> u64 {
+    // Default to 10MB
+    10 * 1024 * 1024
+}
+
+fn default_pin_objects() -> bool {
+    true
+}
+
+fn default_auto_upload() -> bool {
+    true
 }
 
 impl Default for LfsConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            size_threshold: 5 * 1024 * 1024, // 5MB default
+            enabled: default_lfs_enabled(),
+            use_ipfs: default_use_ipfs(),
+            url: None,
+            objects_dir: default_lfs_dir(),
+            size_threshold: default_size_threshold(),
             track_patterns: Vec::new(),
-            objects_dir: PathBuf::from(".git/lfs/objects"),
-            use_ipfs: false,
-            ipfs_gateway: None,
-            ipfs_pin: true,
+            pin_objects: default_pin_objects(),
+            ipfs_primary: false,
+            auto_upload_to_ipfs: default_auto_upload(),
         }
     }
 }
 
 impl LfsConfig {
-    /// Create a new default LFS configuration
+    /// Create a new LFS configuration with default settings
     pub fn new() -> Self {
         Self::default()
     }
     
-    /// Enable LFS
-    pub fn enable(&mut self) {
-        self.enabled = true;
+    /// Enable or disable LFS
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
     }
     
-    /// Disable LFS
-    pub fn disable(&mut self) {
-        self.enabled = false;
+    /// Enable or disable IPFS integration
+    pub fn with_ipfs(mut self, use_ipfs: bool) -> Self {
+        self.use_ipfs = use_ipfs;
+        self
     }
     
-    /// Set the size threshold for automatic tracking
-    pub fn set_size_threshold(&mut self, threshold: u64) {
-        self.size_threshold = threshold;
+    /// Set the LFS server URL
+    pub fn with_url(mut self, url: Option<String>) -> Self {
+        self.url = url;
+        self
+    }
+    
+    /// Set the path to the LFS objects directory
+    pub fn with_objects_dir(mut self, objects_dir: PathBuf) -> Self {
+        self.objects_dir = objects_dir;
+        self
+    }
+    
+    /// Set the size threshold for automatic LFS tracking
+    pub fn with_size_threshold(mut self, size_threshold: u64) -> Self {
+        self.size_threshold = size_threshold;
+        self
     }
     
     /// Add a pattern to track with LFS
-    pub fn add_track_pattern(&mut self, pattern: &str) {
-        self.track_patterns.push(pattern.to_string());
+    pub fn add_track_pattern(mut self, pattern: String) -> Self {
+        self.track_patterns.push(pattern);
+        self
     }
     
-    /// Remove a pattern from LFS tracking
-    pub fn remove_track_pattern(&mut self, pattern: &str) {
-        self.track_patterns.retain(|p| p != pattern);
+    /// Set whether to pin objects in IPFS
+    pub fn with_pin_objects(mut self, pin_objects: bool) -> Self {
+        self.pin_objects = pin_objects;
+        self
     }
     
-    /// Set the directory for LFS objects
-    pub fn set_objects_dir(&mut self, dir: PathBuf) {
-        self.objects_dir = dir;
+    /// Set whether IPFS is the primary storage
+    pub fn with_ipfs_primary(mut self, ipfs_primary: bool) -> Self {
+        self.ipfs_primary = ipfs_primary;
+        self
     }
     
-    /// Enable IPFS integration
-    pub fn enable_ipfs(&mut self, gateway_url: &str) {
-        self.use_ipfs = true;
-        self.ipfs_gateway = Some(gateway_url.to_string());
+    /// Set whether to automatically upload objects to IPFS when downloaded from LFS server
+    pub fn with_auto_upload_to_ipfs(mut self, auto_upload_to_ipfs: bool) -> Self {
+        self.auto_upload_to_ipfs = auto_upload_to_ipfs;
+        self
     }
     
-    /// Disable IPFS integration
-    pub fn disable_ipfs(&mut self) {
-        self.use_ipfs = false;
+    /// Get the absolute path to the LFS objects directory
+    pub fn get_absolute_objects_dir(&self, repo_path: impl AsRef<Path>) -> PathBuf {
+        let repo_path = repo_path.as_ref();
+        
+        if self.objects_dir.is_absolute() {
+            self.objects_dir.clone()
+        } else {
+            repo_path.join(&self.objects_dir)
+        }
     }
     
-    /// Set whether to pin objects on IPFS
-    pub fn set_ipfs_pin(&mut self, pin: bool) {
-        self.ipfs_pin = pin;
-    }
-    
-    /// Load configuration from a git config file
-    pub fn from_git_config(config: &gix_config::File) -> Self {
-        let mut lfs_config = Self::default();
+    /// Check if a file should be tracked based on its path
+    pub fn should_track(&self, path: impl AsRef<Path>) -> bool {
+        let path = path.as_ref();
+        let path_str = path.to_string_lossy();
         
-        // Check if LFS is enabled
-        if let Ok(enabled) = config.boolean("lfs.enabled") {
-            lfs_config.enabled = enabled;
+        for pattern in &self.track_patterns {
+            if let Ok(glob) = glob::Pattern::new(pattern) {
+                if glob.matches(&path_str) {
+                    return true;
+                }
+            }
         }
         
-        // Get the size threshold
-        if let Ok(threshold) = config.integer("lfs.sizethreshold") {
-            lfs_config.size_threshold = threshold as u64;
-        }
-        
-        // Get tracked patterns
-        if let Ok(patterns) = config.string("lfs.trackpatterns") {
-            lfs_config.track_patterns = patterns
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect();
-        }
-        
-        // Get objects directory
-        if let Ok(dir) = config.string("lfs.objectsdir") {
-            lfs_config.objects_dir = PathBuf::from(dir);
-        }
-        
-        // Check if IPFS is enabled
-        if let Ok(use_ipfs) = config.boolean("lfs.ipfs.enabled") {
-            lfs_config.use_ipfs = use_ipfs;
-        }
-        
-        // Get IPFS gateway
-        if let Ok(gateway) = config.string("lfs.ipfs.gateway") {
-            lfs_config.ipfs_gateway = Some(gateway);
-        }
-        
-        // Check if IPFS pinning is enabled
-        if let Ok(pin) = config.boolean("lfs.ipfs.pin") {
-            lfs_config.ipfs_pin = pin;
-        }
-        
-        lfs_config
-    }
-    
-    /// Save configuration to a git config file
-    pub fn to_git_config(&self, config: &mut gix_config::File) -> std::io::Result<()> {
-        // Set LFS enabled
-        config.set_boolean("lfs.enabled", self.enabled)?;
-        
-        // Set size threshold
-        config.set_integer("lfs.sizethreshold", self.size_threshold as i64)?;
-        
-        // Set tracked patterns
-        if !self.track_patterns.is_empty() {
-            let patterns = self.track_patterns.join(",");
-            config.set_str("lfs.trackpatterns", &patterns)?;
-        }
-        
-        // Set objects directory
-        config.set_str(
-            "lfs.objectsdir", 
-            self.objects_dir.to_string_lossy().as_ref()
-        )?;
-        
-        // Set IPFS enabled
-        config.set_boolean("lfs.ipfs.enabled", self.use_ipfs)?;
-        
-        // Set IPFS gateway
-        if let Some(gateway) = &self.ipfs_gateway {
-            config.set_str("lfs.ipfs.gateway", gateway)?;
-        }
-        
-        // Set IPFS pinning
-        config.set_boolean("lfs.ipfs.pin", self.ipfs_pin)?;
-        
-        Ok(())
+        false
     }
 }
