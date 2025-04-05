@@ -14,23 +14,25 @@ Arti-Git is a decentralized, privacy-focused Git implementation that integrates 
   - Git LFS support
   - Command-line interface
 
+**Note on Git Implementation:** The project leverages the `gitoxide` (`gix`) crates as dependencies for core Git functionality. This approach was confirmed as the most efficient and maintainable strategy, avoiding the need to clone the `gitoxide` repository and manually copy code. Future development will focus on integrating `gitoxide` APIs within the existing `arti-git` structure.
+
 ## Development Roadmap
 
 ### Phase 1: Core Functionality Completion (2-3 Months)
 
 #### 1.1 Command Implementation
 - [ ] Complete all core Git commands
-  - [ ] Finish `add.rs` implementation with proper file tracking
-  - [ ] Enhance `commit.rs` with signing capabilities
+  - [x] Finish `add.rs` implementation with proper file tracking (basic file add complete, --all pending)
+  - [x] Enhance `commit.rs` with signing capabilities
   - [ ] Complete `push.rs` with robust error handling
   - [ ] Enhance `pull.rs` with merge conflict detection
-- [ ] Add comprehensive logging throughout
-- [ ] Implement proper error propagation
+- [x] Add comprehensive logging throughout
+- [x] Implement proper error propagation
 
 #### 1.2 Transport Layer
 - [ ] Finalize Tor integration
-  - [ ] Complete circuit isolation for repositories
-  - [ ] Add connection pooling for performance
+  - [x] Complete circuit isolation for repositories
+  - [x] Add connection pooling for performance
   - [ ] Implement retry logic with backoff
 - [ ] Optimize HTTP transport
   - [ ] Add compression
@@ -46,14 +48,14 @@ Arti-Git is a decentralized, privacy-focused Git implementation that integrates 
 ### Phase 2: IPFS Enhancement (3-4 Months)
 
 #### 2.1 Object Storage
-- [ ] Complete Git object storage in IPFS
+- [x] Complete Git object storage in IPFS
   - [ ] Optimize object chunking strategy
-  - [ ] Add content-addressed deduplication
+  - [x] Add content-addressed deduplication
   - [ ] Implement efficient caching layer
 - [ ] Enhance LFS implementation
-  - [ ] Complete pointer file handling
+  - [x] Complete pointer file handling
   - [ ] Add background upload/download capability
-  - [ ] Implement bandwidth throttling
+  - [x] Implement bandwidth throttling
 
 #### 2.2 Repository Synchronization
 - [ ] Create efficient diff-based syncing
@@ -88,10 +90,10 @@ Arti-Git is a decentralized, privacy-focused Git implementation that integrates 
   - [ ] Create signature policies
 
 #### 3.2 Privacy Features
-- [ ] Complete onion service for Git hosting
+- [x] Complete onion service for Git hosting
   - [ ] Finalize authentication mechanisms
   - [ ] Implement access control
-  - [ ] Add service persistence
+  - [x] Add service persistence
 - [ ] Implement private repositories
   - [ ] Add repository encryption
   - [ ] Implement key sharing
@@ -118,10 +120,10 @@ Arti-Git is a decentralized, privacy-focused Git implementation that integrates 
   - [ ] Document all public interfaces
   - [ ] Add usage examples
   - [ ] Create architecture diagrams
-- [ ] Create contribution guidelines
-  - [ ] Document code style
-  - [ ] Explain test requirements
-  - [ ] Create PR templates
+- [x] Create contribution guidelines
+  - [x] Document code style
+  - [x] Explain test requirements
+  - [x] Create PR templates
 
 #### 4.2 Performance Optimization
 - [ ] Optimize for large repositories

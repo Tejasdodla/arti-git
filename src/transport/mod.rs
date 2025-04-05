@@ -8,34 +8,35 @@ pub use tor::{TorConnection, AsyncRemoteConnection};
 pub use gix_tor::{TorTransport, TorGixConnection, TorTransportError, create_tor_transport};
 pub use registry::{ArtiGitTransportRegistry, create_transport_registry};
 
-use crate::core::{Result, ObjectId, ObjectType};
+use crate::core::Result; // Keep Result if used elsewhere, remove ObjectId, ObjectType if not
+use std::sync::Arc;
+use gix_transport::client::Transport as GixTransport; // Alias gitoxide's trait
 
-/// Common trait for all transport types
-pub trait Transport {
-    /// Get references from the remote
-    fn list_refs(&mut self) -> Result<Vec<(String, ObjectId)>>;
-    
-    /// Fetch objects from the remote
-    fn fetch(&mut self, wants: &[ObjectId], haves: &[ObjectId]) -> Result<Vec<(ObjectType, Vec<u8>)>>;
-    
-    /// Push objects to the remote
-    fn push(&mut self, objects: &[(ObjectType, Vec<u8>)], refs: &[(String, ObjectId)]) -> Result<()>;
-}
+/// Registers custom transports with gitoxide.
+/// Should be called once at application startup.
+pub async fn register_transports() -> Result<()> {
+    // Register Tor transport for .onion addresses
+    // Use the existing create_tor_transport function from gix_tor.rs
+    let tor_transport = Arc::new(create_tor_transport(None).await?);
 
-/// Factory for creating appropriate transport implementations based on URL
-pub struct TransportFactory;
+    // Define the condition for using this transport
+    let tor_condition = |url: &gix_url::Url| -> bool {
+        url.host().map_or(false, |host| host.ends_with(".onion"))
+    };
 
-impl TransportFactory {
-    /// Create a new transport based on the URL scheme
-    pub fn create(url: &str) -> Result<Box<dyn Transport>> {
-        if url.starts_with("http://") || url.starts_with("https://") {
-            Ok(Box::new(http::HttpConnection::new(url)?))
-        } else if url.contains(".onion") {
-            Ok(Box::new(tor::TorConnection::new(url)?))
+    // Register the transport with the condition
+    // This function overrides gitoxide's default transport resolution.
+    gix_transport::client::set_required_transport_override(move |url, _remote_name| {
+        if tor_condition(url) {
+            Some(tor_transport.clone() as Arc<dyn GixTransport + Send + Sync>)
         } else {
-            Err(crate::core::GitError::Transport(format!(
-                "Unsupported URL scheme: {}", url
-            )))
+            None // Let gitoxide handle other protocols (like file://, http://)
         }
-    }
+    });
+
+    log::info!("Registered Tor transport for .onion addresses.");
+
+    // TODO: Register other custom transports if needed (e.g., IPFS)
+
+    Ok(())
 }

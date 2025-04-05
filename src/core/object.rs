@@ -1,6 +1,7 @@
 use std::fmt;
 
 use crate::core::{GitError, Result};
+use gix::hash::ObjectId as GixObjectId; // Import gitoxide ObjectId
 
 /// Represents a Git object ID (SHA-1 hash)
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +43,15 @@ impl ObjectId {
 impl fmt::Display for ObjectId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.to_hex())
+    }
+}
+
+// Implement conversion from gitoxide's ObjectId
+impl From<GixObjectId> for ObjectId {
+    fn from(gix_oid: GixObjectId) -> Self {
+        ObjectId {
+            id: *gix_oid.as_bytes(), // gix_oid.as_bytes() returns &[u8; 20]
+        }
     }
 }
 

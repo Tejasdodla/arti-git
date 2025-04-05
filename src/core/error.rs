@@ -34,6 +34,12 @@ pub enum GitError {
     ObjectStorage(String),
     /// Authentication errors
     Authentication(String),
+    /// Packfile generation errors
+    PackGeneration(String),
+    /// Merge conflict error, contains conflicting paths
+    MergeConflict(Vec<String>),
+    /// General merge failure
+    MergeFailure(String),
 }
 
 impl fmt::Display for GitError {
@@ -55,6 +61,9 @@ impl fmt::Display for GitError {
             GitError::IpfsError(msg) => write!(f, "IPFS error: {}", msg),
             GitError::ObjectStorage(msg) => write!(f, "Object storage error: {}", msg),
             GitError::Authentication(msg) => write!(f, "Authentication error: {}", msg),
+            GitError::PackGeneration(msg) => write!(f, "Packfile generation error: {}", msg),
+            GitError::MergeConflict(paths) => write!(f, "Merge conflict in files: {}", paths.join(", ")),
+            GitError::MergeFailure(msg) => write!(f, "Merge failed: {}", msg),
         }
     }
 }

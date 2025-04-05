@@ -193,6 +193,15 @@ enum IpfsCommands {
 async fn main() -> Result<()> {
     // Parse the command line arguments
     let cli = Cli::parse();
+
+    // --- Initialize Transports ---
+    // Register custom transports (like Tor) with gitoxide
+    if let Err(e) = transport::register_transports().await {
+        eprintln!("Failed to register custom transports: {}", e);
+        // Decide if this is a fatal error
+        // process::exit(1);
+    }
+    // --- End Initialize Transports ---
     
     // Load config
     let config_path = cli.config

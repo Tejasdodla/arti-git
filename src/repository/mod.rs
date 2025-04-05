@@ -6,7 +6,7 @@ mod commit;
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use chrono::{DateTime, Utc};
-
+use gix::index::File as IndexFile; // <-- Add use statement
 use crate::core::{Result, GitError, ObjectId};
 use crate::crypto::SignatureProvider;
 
@@ -82,6 +82,8 @@ pub struct Repository {
     git_dir: PathBuf,
     /// Configuration
     config: Config,
+    /// The Git index file
+    index: IndexFile,
 }
 
 impl Repository {
@@ -118,17 +120,40 @@ impl Repository {
         
         // Load configuration
         let config = Config::load_from_repo(&git_dir)?;
-        
+        let index_path = git_dir.join("index");
+
+        // Load the index file
+        let index = IndexFile::at(&index_path, gix::index::decode::Options::default())
+            .map_err(|e| GitError::Repository(format!("Failed to load index file '{}': {}", index_path.display(), e), Some(path.to_path_buf())))?;
+
+        // TODO: Initialize object store, refs store etc.
         Ok(Self {
             path: path.to_path_buf(),
             git_dir,
             config,
+            index,
         })
     }
     
     /// Get repository configuration
     pub fn get_config(&self) -> &Config {
         &self.config
+    }
+
+    /// Get mutable access to the index
+    pub fn index_mut(&mut self) -> &mut IndexFile {
+        &mut self.index
+    }
+
+    /// Write a blob object to the object database
+    pub fn write_blob(&self, data: &[u8]) -> Result<ObjectId> {
+        let blob = Blob { data };
+        let mut odb = gix::open(&self.git_dir)
+            .map_err(|e| GitError::Repository(format!("Failed to open ODB: {}", e), Some(self.path.clone())))?
+            .objects;
+        let gix_oid = odb.write_buf(gix::objs::Kind::Blob, data)
+            .map_err(|e| GitError::ObjectStorage(format!("Failed to write blob: {}", e)))?;
+        Ok(ObjectId::from_bytes(gix_oid.as_bytes())?)
     }
     
     /// Set the HEAD reference

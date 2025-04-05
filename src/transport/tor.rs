@@ -16,11 +16,12 @@ use tor_rtcompat::PreferredRuntime;
 use tor_rtcompat::Runtime;
 use gix_url::Url as GixUrl;
 use gix_transport::client::{Transport, RequestWriter, GetRequest, FetchRequest, Error as TransportError};
-use gix_protocol::{fetch, transport};
+use gix_protocol::{fetch, transport, packetline, sideband}; // Added packetline and sideband
+use gix_protocol::pack::report_status; // Added report_status
 
 use crate::core::{GitError, Result, ObjectId, ObjectType, RemoteConnection};
 use crate::core::{io_err, transport_err};
-use crate::protocol::{parse_git_command, process_wants, receive_packfile};
+use crate::protocol::{parse_git_command, process_wants, receive_packfile}; // Keep local protocol utils if needed elsewhere
 use crate::utils;
 
 /// Connection stats for monitoring and diagnostics
@@ -405,113 +406,109 @@ impl TorTransport {
             }
         }
         
-        // Create a new connection if none is available in the pool
-        log::debug!("Creating new Tor connection to {}", key);
-        
-        // Configure stream preferences based on security settings
-        let mut stream_prefs = self.stream_prefs.clone();
-        
-        // Set isolation if enabled
-        if self.security_settings.isolate_streams {
-            stream_prefs = stream_prefs.isolate_connection();
-        }
-        
-        let start_time = std::time::Instant::now();
-        
-        // Apply proxy settings if needed
-        if self.proxy_settings.proxy_type != TorProxyType::Direct {
-            // In a real implementation, we would configure the proxy here
-            // This depends on the specific Arti API for proxy configuration
-            match self.proxy_settings.proxy_type {
-                TorProxyType::Socks5 => {
-                    log::debug!("Using SOCKS5 proxy {}:{} for Tor connection", 
-                                self.proxy_settings.host, self.proxy_settings.port);
-                    // Configure SOCKS5 proxy in stream_prefs
-                },
-                TorProxyType::Https => {
-                    log::debug!("Using HTTPS proxy {}:{} for Tor connection",
-                                self.proxy_settings.host, self.proxy_settings.port);
-                    // Configure HTTPS proxy in stream_prefs
-                },
-                _ => {}
+        // --- Connection Attempt Loop with Retry ---
+        let max_attempts = 3; // Max number of connection attempts
+        let initial_delay = Duration::from_secs(1); // Initial delay before first retry
+        let backoff_factor = 2.0; // Exponential backoff factor
+        let mut current_delay = initial_delay;
+        let mut last_error: Option<GitError> = None;
+
+        for attempt in 1..=max_attempts {
+            log::debug!("Attempt {}/{} to connect to {}", attempt, max_attempts, key);
+
+            // Configure stream preferences based on security settings
+            let mut stream_prefs = self.stream_prefs.clone();
+            if self.security_settings.isolate_streams {
+                stream_prefs = stream_prefs.isolate_connection();
             }
+
+            // Apply proxy settings if needed (Placeholder - needs Arti API integration)
+            if self.proxy_settings.proxy_type != TorProxyType::Direct {
+                log::debug!("Proxy settings detected but not yet implemented for Arti connection.");
+                // Configure proxy in stream_prefs here when Arti supports it easily
+            }
+
+            // Add authentication if available (Placeholder - needs Arti API integration)
+            // Authentication typically happens at a higher protocol level (e.g., HTTP Basic Auth)
+            // rather than during the raw Tor stream connection.
+            // We'll keep the credential storage but remove direct application here.
+            // let mut auth_header = None; ...
+
+            let start_time = std::time::Instant::now();
+
+            // Use timeout for connection establishment
+            let connection_result = timeout(
+                Duration::from_secs(self.connection_timeout),
+                self.tor_client.connect(&key, &stream_prefs)
+            ).await;
+
+            let connection_time = start_time.elapsed().as_millis() as u64;
+
+            // Handle timeout and connection errors
+            match connection_result {
+                Ok(Ok(stream)) => { // Successfully connected
+                    // Verify the repository fingerprint
+                    if let Err(e) = self.verify_fingerprint(host, &stream).await {
+                        log::error!("Fingerprint verification failed for {}: {}", key, e);
+                        last_error = Some(e);
+                        // Treat fingerprint failure as non-retryable for this attempt
+                        // We could potentially close the stream and retry, but let's fail for now.
+                        break;
+                    }
+
+                    // Update stats for successful connection
+                    {
+                        let mut stats = self.stats.write().await;
+                        stats.successful_connections += 1;
+                        let total_conns = stats.successful_connections as u64;
+                        if total_conns > 1 {
+                            stats.avg_connection_time_ms = ((stats.avg_connection_time_ms * (total_conns - 1)) + connection_time) / total_conns;
+                        } else {
+                            stats.avg_connection_time_ms = connection_time;
+                        }
+                        if host.ends_with(".onion") { stats.secured_connections += 1; }
+                    }
+                    log::debug!("Connected to {} in {}ms (Attempt {})", key, connection_time, attempt);
+                    return Ok(stream); // Success! Exit the loop and return the stream.
+                },
+                Ok(Err(e)) => { // Connection attempt failed with an Arti error
+                    let err_msg = format!("Connection attempt {} failed for {}: {}", attempt, key, e);
+                    log::warn!("{}", err_msg); // Log as warning during retries
+                    last_error = Some(transport_err(err_msg, Some(&key)));
+                    // TODO: Check if `e` (arti_client::Error) is retryable.
+                    // For now, assume most connection errors *might* be transient.
+                    let is_retryable = true;
+                    if !is_retryable || attempt == max_attempts {
+                        break; // Stop retrying if error is not retryable or max attempts reached
+                    }
+                },
+                Err(_) => { // Connection attempt timed out
+                    let err_msg = format!("Connection attempt {} timed out after {}s for {}", attempt, self.connection_timeout, key);
+                    log::warn!("{}", err_msg);
+                    last_error = Some(transport_err(err_msg, Some(&key)));
+                    if attempt == max_attempts {
+                        break; // Stop retrying if max attempts reached
+                    }
+                }
+            }
+
+            // If we reached here, the attempt failed but we might retry.
+            log::info!("Waiting {:?} before next connection attempt to {}", current_delay, key);
+            tokio::time::sleep(current_delay).await;
+            // Increase delay for next attempt
+            current_delay = Duration::from_secs_f64(current_delay.as_secs_f64() * backoff_factor);
         }
-        
-        // Add authentication if available
-        let mut auth_header = None;
+
+        // If the loop finished without returning Ok(stream), it means all attempts failed.
+        log::error!("All {} connection attempts failed for {}", max_attempts, key);
+        // Update stats for the final failure
         {
-            let credentials = self.auth_credentials.read().await;
-            if let Some((username, password)) = credentials.get(host) {
-                // Create Basic authentication header
-                let auth = format!("{}:{}", username, password);
-                let encoded = base64::encode(auth.as_bytes());
-                auth_header = Some(format!("Authorization: Basic {}\r\n", encoded));
-                
-                log::debug!("Using authentication for {}", host);
-            }
+            let mut stats = self.stats.write().await;
+            stats.failed_connections += 1; // Count the overall failure once
         }
-        
-        // Use timeout for connection establishment
-        let connection_result = timeout(
-            Duration::from_secs(self.connection_timeout),
-            self.tor_client.connect(&key, &stream_prefs)
-        ).await;
-        
-        // Calculate connection time
-        let connection_time = start_time.elapsed().as_millis() as u64;
-        
-        // Handle timeout and connection errors
-        match connection_result {
-            Ok(Ok(stream)) => {
-                // Verify the repository fingerprint
-                self.verify_fingerprint(host, &stream).await?;
-                
-                // Update stats for successful connection
-                {
-                    let mut stats = self.stats.write().await;
-                    stats.successful_connections += 1;
-                    
-                    // Update average connection time
-                    let total_conns = stats.successful_connections as u64;
-                    if total_conns > 1 {
-                        stats.avg_connection_time_ms = 
-                            ((stats.avg_connection_time_ms * (total_conns - 1)) + connection_time) / total_conns;
-                    } else {
-                        stats.avg_connection_time_ms = connection_time;
-                    }
-                    
-                    // Count as secured if it's an onion address
-                    if host.ends_with(".onion") {
-                        stats.secured_connections += 1;
-                    }
-                }
-                
-                log::debug!("Connected to {} in {}ms", key, connection_time);
-                Ok(stream)
-            },
-            Ok(Err(e)) => {
-                // Update stats for failed connection
-                {
-                    let mut stats = self.stats.write().await;
-                    stats.failed_connections += 1;
-                }
-                
-                let err_msg = format!("Failed to connect to {}: {}", key, e);
-                log::error!("{}", err_msg);
-                Err(transport_err(err_msg, Some(&key)))
-            },
-            Err(_) => {
-                // Update stats for timeout
-                {
-                    let mut stats = self.stats.write().await;
-                    stats.failed_connections += 1;
-                }
-                
-                let err_msg = format!("Connection timeout after {}s: {}", self.connection_timeout, key);
-                log::error!("{}", err_msg);
-                Err(transport_err(err_msg, Some(&key)))
-            }
-        }
+        // Return the last recorded error
+        Err(last_error.unwrap_or_else(|| transport_err("Connection failed after multiple retries with unknown error", Some(&key))))
+    }
     }
     
     /// Return a connection to the pool
@@ -1047,25 +1044,10 @@ impl Transport for TorTransport {
         // Handle different Git services
         match service {
             transport::Service::UploadPack => {
-                // Extract any extra data from the initial response
-                let extra_data = initial_response_of_fetch.map(|resp| {
-                    // Convert the response to bytes
-                    resp.into()
-                });
-                
-                // Create the fetch request
-                let fetch_request = FetchRequest {
-                    url: url_string.clone(),
-                    extra_data,
-                };
-                
-                // Execute the upload-pack request
-                let response = execute_async(async move {
-                    this.upload_pack(&url_string, &fetch_request).await
-                })?;
-                
-                // Create a request writer with the response
-                let writer = TorRequestWriter::new(response);
+                // For UploadPack (fetch), we return a writer that handles the stateful negotiation
+                // when its `write` method is called by gitoxide.
+                log::debug!("Creating TorFetchWriter for UploadPack request to {}", url_string);
+                let writer = TorFetchWriter::new(this, url_string, initial_response_of_fetch);
                 Ok(Box::new(writer))
             },
             transport::Service::ReceivePack => {
@@ -1084,6 +1066,220 @@ impl Transport for TorTransport {
     
     fn supports_url(url: &GixUrl) -> bool {
         Self::handles_url(&url.to_string())
+    }
+}
+
+// --- TorFetchWriter for handling stateful fetch ---
+
+/// Handles the stateful fetch process (upload-pack) over Tor.
+pub struct TorFetchWriter {
+    transport: TorTransport,
+    url: String,
+    // Optional initial response data (e.g., from HTTP GET) - might not be used directly with Tor stream
+    _initial_response: Option<fetch::Response>,
+    // Buffer to store the received packfile data after negotiation
+    pack_data: Option<Vec<u8>>,
+    // TODO: Add state for negotiation results if needed (e.g., shallow commits)
+}
+
+impl TorFetchWriter {
+    pub fn new(transport: TorTransport, url: String, initial_response: Option<fetch::Response>) -> Self {
+        Self {
+            transport,
+            url,
+            _initial_response: initial_response,
+            pack_data: None,
+        }
+    }
+}
+
+impl RequestWriter for TorFetchWriter {
+    /// Receives fetch arguments, performs negotiation, and reads the packfile.
+    fn write(&mut self, fetch_args_pkt_lines: &[u8]) -> std::io::Result<usize> {
+        log::debug!("TorFetchWriter::write called with {} bytes of fetch arguments", fetch_args_pkt_lines.len());
+
+        // Clone necessary parts for the async block
+        let transport = self.transport.clone();
+        let url = self.url.clone();
+        // Clone the arguments data to be moved into the async block
+        let fetch_args_data = fetch_args_pkt_lines.to_vec();
+
+        // Use the execute_async helper (or similar blocking mechanism)
+        // This runs the async fetch logic and blocks until completion.
+        let result: std::result::Result<Vec<u8>, TransportError> = transport.execute_async(async move {
+            // 1. Get Connection
+            let (host, port) = transport.parse_url(&url)?;
+            let mut stream = transport.get_connection(&host, port).await?;
+            log::debug!("Got Tor stream for fetch to {}", url);
+
+            // 2. Send "git-upload-pack" command
+            // Extract repo path from URL (assuming standard Git URL format)
+            let parsed_url = Url::parse(&url).map_err(|e| GitError::Transport(format!("Invalid URL: {}", e), Some(url.clone())))?;
+            let repo_path = parsed_url.path().trim_start_matches('/'); // Remove leading slash
+            let command = format!("git-upload-pack {}\0host={}\0", repo_path, host);
+            log::debug!("Sending upload-pack command: '{}'", command.replace('\0', "\\0"));
+            packetline::write_str(&mut stream, &command).await
+                .map_err(|e| GitError::Transport(format!("Failed to send upload-pack command: {}", e), Some(url.clone())))?;
+
+            // 3. Read initial ref advertisement (optional but good practice)
+            // TODO: Read and potentially parse the advertisement before sending wants/haves
+            // let mut advertisement_reader = packetline::Reader::new(&mut stream);
+            // while let Some(line) = advertisement_reader.read_line().await? { ... }
+            log::debug!("Skipping reading ref advertisement for now.");
+
+            // 4. Send Wants/Haves/Args received from gitoxide
+            log::debug!("Sending {} bytes of fetch arguments (wants/haves)...", fetch_args_data.len());
+            stream.write_all(&fetch_args_data).await
+                .map_err(|e| GitError::Transport(format!("Failed to send fetch arguments: {}", e), Some(url.clone())))?;
+            // The `fetch_args_data` should already contain the flush packet sent by gitoxide fetch logic.
+
+            // 5. Read Negotiation Response (ACKs/NAKs)
+            // The gitoxide fetch handler is responsible for the negotiation loop.
+            // This `write` method is called with the *initial* set of wants/haves.
+            // The response we read here should be the server's first reaction,
+            // typically ACKs/NAKs indicating which 'haves' it recognized,
+            // potentially followed immediately by the packfile if the negotiation is simple.
+            // For complex negotiations, gitoxide would call `write` again with more 'haves'.
+            // We read until the server signals the end of negotiation (typically with ACK common <oid> or just ACK <oid> ready)
+            // or sends a NAK indicating it needs more 'have's (which gitoxide should handle by calling write() again).
+            // Or until a flush packet is received.
+            log::debug!("Reading negotiation response (ACKs/NAKs)...");
+            let mut negotiation_reader = packetline::Reader::new(&mut stream);
+            let mut negotiation_ended = false;
+            loop {
+                let line = negotiation_reader.read_line().await
+                    .map_err(|e| GitError::Transport(format!("Failed to read negotiation response: {}", e), Some(url.clone())))?;
+                
+                if let Some(line_bytes) = line.as_bytes() {
+                    let line_str = String::from_utf8_lossy(line_bytes);
+                    log::debug!("Negotiation line: {}", line_str.trim_end());
+                    
+                    // Basic check for end of negotiation signals (can be refined)
+                    // A real implementation should parse ACKs properly using gix::protocol::fetch::Response::from_line
+                    if line_str.starts_with("ACK") && (line_str.contains(" ready") || line_str.contains(" common")) {
+                        negotiation_ended = true;
+                        // Keep reading until flush packet
+                    } else if line_str.starts_with("NAK") {
+                        // Server needs more info, gitoxide fetch state machine should handle this
+                        // by potentially calling write() again with more haves.
+                        // We just continue reading the current response block.
+                    } else if !line_str.starts_with("ACK") {
+                        // Not ACK/NAK, assume start of pack or error
+                        log::debug!("Non-ACK/NAK line received, assuming end of negotiation phase.");
+                        // Need to stop reading here.
+                        break;
+                    }
+                } else {
+                    // Flush packet indicates end of this negotiation response block
+                    log::debug!("Flush packet received, negotiation response block finished.");
+                    break;
+                }
+            }
+            // Note: A full implementation would likely involve gix::protocol::fetch::handshake
+            // and potentially loop based on ACK/NAK results. This simplified version assumes
+            // gitoxide handles the higher-level loop and we just process one round here.
+
+            // 6. Send "done" (conditionally)
+            // If the negotiation loop above determined the server is ready (negotiation_ended = true),
+            // and if the arguments sent by gitoxide didn't *already* contain "done",
+            // we might need to send it now to trigger the packfile response.
+            // This logic is complex and depends heavily on the protocol version and negotiation state.
+            // For now, we assume gitoxide includes "done" in `fetch_args_data` when appropriate.
+            if negotiation_ended {
+                log::debug!("Negotiation ended (server ACK ready/common). Assuming 'done' was sent by gitoxide if needed.");
+                // Example of sending 'done' if we were managing the state:
+                // if !fetch_args_data.windows(4).any(|window| window == b"done") { // Check if args already contain "done"
+                //     log::debug!("Sending 'done' command to trigger packfile.");
+                //     packetline::write_str(&mut stream, "done").await
+                //         .map_err(|e| GitError::Transport(format!("Failed to send 'done' command: {}", e), Some(url.clone())))?;
+                // }
+            } else {
+                log::debug!("Negotiation phase ended without explicit server ready signal (maybe non-ACK line or flush).");
+            }
+
+            // 7. Read Packfile Stream
+            // 7. Read Packfile Stream
+            // The negotiation_reader might have consumed the first line if it wasn't ACK/NAK.
+            // The packfile itself might be sideband encoded.
+            log::debug!("Attempting to read packfile stream (potentially sideband encoded)...");
+            // Use a sideband decoder to handle progress/error messages multiplexed with pack data.
+            // The underlying reader is the `negotiation_reader` which is positioned after negotiation.
+            let mut sideband_reader = sideband::decode::Reader::new(negotiation_reader);
+            let mut pack_data = Vec::new();
+            
+            loop {
+                match sideband_reader.read_line().await {
+                    Ok(Some(sideband::PacketLineRef::Data(line))) => {
+                        pack_data.extend_from_slice(line);
+                    }
+                    Ok(Some(sideband::PacketLineRef::Progress(line))) => {
+                        log::info!("Fetch progress: {}", String::from_utf8_lossy(line).trim_end());
+                    }
+                    Ok(Some(sideband::PacketLineRef::Error(line))) => {
+                        let error_msg = String::from_utf8_lossy(line).trim_end().to_string();
+                        log::error!("Remote fetch error: {}", error_msg);
+                        // Return a protocol error, as the remote indicated failure
+                        return Err(GitError::Protocol(format!("Remote error during fetch: {}", error_msg)));
+                    }
+                    Ok(None) => {
+                        // End of stream (flush packet)
+                        log::debug!("End of packfile stream detected.");
+                        break;
+                    }
+                    Err(e) => {
+                        log::error!("Error reading sideband stream: {}", e);
+                        return Err(GitError::Transport(format!("Failed to read packfile sideband stream: {}", e), Some(url.clone())));
+                    }
+                }
+            }
+            log::debug!("Read {} bytes of packfile data.", pack_data.len());
+
+            // Return connection to pool
+            transport.return_connection(&host, port, stream).await;
+
+            Ok(pack_data)
+        });
+
+        // Store the received pack data or handle error
+        match result {
+            Ok(pack_data) => {
+                self.pack_data = Some(pack_data);
+                Ok(fetch_args_pkt_lines.len()) // Indicate we consumed the input args
+            }
+            Err(e) => {
+                log::error!("Async fetch operation failed: {}", e);
+                // Map the TransportError back to io::Error for the RequestWriter trait
+                Err(io::Error::new(io::ErrorKind::Other, e.to_string()))
+            }
+        }
+    }
+
+    /// Returns the packfile data received during the `write` call.
+    fn response(&mut self) -> std::io::Result<&[u8]> {
+        log::debug!("TorFetchWriter::response called");
+        match &self.pack_data {
+            Some(data) => {
+                log::debug!("Returning {} bytes of pack data", data.len());
+                Ok(data.as_slice())
+            },
+            None => {
+                log::error!("TorFetchWriter::response called before write completed successfully");
+                Err(io::Error::new(io::ErrorKind::Other, "Fetch did not complete or failed"))
+            }
+        }
+    }
+}
+
+// Need to implement Write for TorFetchWriter so it can be boxed
+impl io::Write for TorFetchWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // This delegates to the RequestWriter::write method
+        RequestWriter::write(self, buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        // No-op for this writer, flushing happens during the write call's interaction
+        Ok(())
     }
 }
 
@@ -1325,8 +1521,107 @@ impl AsyncRemoteConnection for TorConnection {
         // In a real implementation, we would parse the packfile here
         Ok(Vec::new())
     }
-    
-    async fn push_objects_async(&mut self, objects: &[(ObjectType, ObjectId, Bytes)], refs: &[(String, ObjectId)]) 
+
+    /// Push a pre-generated packfile asynchronously
+    async fn push_packfile_async(&mut self, pack_data: &[u8], refs: &[(String, ObjectId)]) -> Result<()> {
+        log::info!("Pushing packfile ({} bytes) and {} refs via Tor", pack_data.len(), refs.len());
+
+        // --- Build the request ---
+        // 1. Reference updates
+        let mut request_data = Vec::new();
+        for (ref_name, new_oid) in refs {
+            // For simplicity, assume we always push, needing old_oid = zero
+            // A real implementation needs negotiation to get the actual old_oid from the remote's ref advertisement.
+            let old_oid_zero = ObjectId::from_hex("0000000000000000000000000000000000000000")?;
+            let line = format!("{} {} {}\0", old_oid_zero, new_oid, ref_name);
+            // Use pkt-line encoding
+            let pkt_line = format!("{:04x}{}", line.len() + 4, line);
+            request_data.extend_from_slice(pkt_line.as_bytes());
+        }
+        // Add flush packet to signify end of ref updates
+        request_data.extend_from_slice(b"0000");
+
+        // 2. Packfile data
+        request_data.extend_from_slice(pack_data);
+
+        // --- Send request using receive-pack service via TorTransport ---
+        // The TorTransport::receive_pack method handles connecting, sending the git-receive-pack command,
+        // and transmitting the provided request_data (which now includes ref updates + packfile).
+        let response_bytes = self.transport.receive_pack(&self.url, &request_data).await?;
+
+        // --- Parse the response (report-status) ---
+        log::debug!("Received receive-pack response: {} bytes. Parsing status report...", response_bytes.len());
+        let mut reader = packetline::Reader::new(&response_bytes[..]);
+        let mut line = reader.read_line().await?; // Read the first line (should be unpack status or first ref status)
+
+        let mut unpack_ok = false;
+        let mut ref_errors = Vec::new();
+
+        // Check unpack status
+        if let Some(line_bytes) = line.as_bytes() {
+            if line_bytes.starts_with(b"unpack ") {
+                match report_status::decode_unpack_status(line_bytes) {
+                    Ok(report_status::UnpackStatus::Ok) => {
+                        unpack_ok = true;
+                        log::debug!("Unpack status: OK");
+                    }
+                    Ok(report_status::UnpackStatus::NotOk { error }) => {
+                        log::error!("Unpack status: Error - {}", error);
+                        // Even if unpack fails, continue to read ref statuses
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to parse unpack status line: {}", e);
+                        // Continue anyway, maybe it's a ref status
+                    }
+                }
+                line = reader.read_line().await?; // Read next line for ref status
+            }
+        } else {
+            // If the first line is None (flush packet), something is wrong or empty response
+            return Err(GitError::Protocol("Empty or invalid status report received from remote".to_string()));
+        }
+
+        // Read ref statuses until flush packet
+        while let Some(line_bytes) = line.as_bytes() {
+            match report_status::decode_ref_status(line_bytes) {
+                Ok(report_status::RefStatus::Ok { .. }) => {
+                    // Ref updated successfully, log or ignore
+                    // log::debug!("Ref status OK for: {}", ref_name);
+                }
+                Ok(report_status::RefStatus::NotOk { reference, error }) => {
+                    log::error!("Ref status Error for {}: {}", reference, error);
+                    ref_errors.push(format!("Ref '{}': {}", reference, error));
+                }
+                Err(e) => {
+                    let line_str = String::from_utf8_lossy(line_bytes);
+                    log::warn!("Failed to parse ref status line '{}': {}", line_str, e);
+                    // Potentially treat as an error or try to continue
+                    ref_errors.push(format!("Invalid status line: {}", line_str));
+                }
+            }
+            line = reader.read_line().await?; // Read next line
+        }
+
+        // Check overall status
+        if !unpack_ok {
+            // If unpack failed, report that as the primary error, possibly including ref errors
+            let error_details = if ref_errors.is_empty() {
+                "Remote failed to unpack objects.".to_string()
+            } else {
+                format!("Remote failed to unpack objects. Ref errors: [{}]", ref_errors.join("; "))
+            };
+            Err(GitError::Protocol(error_details))
+        } else if !ref_errors.is_empty() {
+            // If unpack was ok, but refs failed
+            Err(GitError::Protocol(format!("Push partially failed. Ref errors: [{}]", ref_errors.join("; "))))
+        } else {
+            // Unpack OK and no ref errors
+            log::info!("Push successful: Unpack OK and all refs updated.");
+            Ok(())
+        }
+    }
+
+    async fn push_objects_async(&mut self, objects: &[(ObjectType, ObjectId, Bytes)], refs: &[(String, ObjectId)])
         -> Result<()> {
         
         log::info!("Pushing {} objects and {} refs via Tor", objects.len(), refs.len());

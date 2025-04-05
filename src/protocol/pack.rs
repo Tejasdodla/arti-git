@@ -136,13 +136,48 @@ impl Pack {
         // Create a hasher to calculate the pack checksum
         let mut hasher = Sha1::new();
         let mut tee_writer = TeeWriter { writer, hasher: &mut hasher };
-        
+
+        // Ensure header reflects the actual number of entries
+        let mut header = self.header.clone();
+        header.object_count = self.entries.len() as u32;
+
         // Write the header
-        self.header.write_to(&mut tee_writer)?;
-        
-        // TODO: Write all entries
-        // This is a placeholder - actual implementation would
-        // encode and write all objects in the pack
+        header.write_to(&mut tee_writer)?;
+
+        // Write all entries
+        for entry in &self.entries {
+            // Determine the pack object type code
+            let type_code = match entry.obj_type {
+                ObjectType::Commit => 1,
+                ObjectType::Tree => 2,
+                ObjectType::Blob => 3,
+                ObjectType::Tag => 4,
+                // TODO: Handle delta types (OBJ_OFS_DELTA, OBJ_REF_DELTA)
+                _ => return Err(GitError::InvalidObject(format!("Unsupported object type for packing: {:?}", entry.obj_type))),
+            };
+
+            // Write the type and size header (variable length encoding)
+            let size = entry.data.len();
+            let mut header_byte = (type_code << 4) | (size & 0x0F) as u8;
+            let mut remaining_size = size >> 4;
+            let mut header_bytes = Vec::new();
+
+            while remaining_size > 0 {
+                header_bytes.push(header_byte | 0x80); // Set continuation bit
+                header_byte = (remaining_size & 0x7F) as u8;
+                remaining_size >>= 7;
+            }
+            header_bytes.push(header_byte); // Last byte without continuation bit
+            tee_writer.write_all(&header_bytes)?;
+
+            // TODO: Handle delta base object ID writing if applicable
+
+            // Write the compressed object data
+            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&entry.data)?;
+            let compressed_data = encoder.finish()?;
+            tee_writer.write_all(&compressed_data)?;
+        }
         
         // Calculate and write the checksum
         let hash = tee_writer.hasher.finalize();

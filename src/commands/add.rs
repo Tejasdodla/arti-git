@@ -1,7 +1,14 @@
 use std::path::{Path, PathBuf};
+use std::fs;
+// use gix::index::entry::Mode; // Not needed directly
+// use gix::index::entry::Flags; // Not needed directly
+use gix::index::add::Options as AddOptions; // Options for adding
+use gix::progress; // For progress reporting
+use gix::interrupt; // For cancellation
+use gix::Repository as GixRepository; // Use alias
 
-use crate::core::{GitError, Result, ObjectId, ObjectType};
-use crate::repository::Repository;
+use crate::core::{GitError, Result}; // ObjectId, ObjectType, operations not needed
+// use crate::repository::Repository; // Replaced by gix::Repository
 
 /// Implements the `add` command functionality
 pub struct AddCommand {
@@ -25,41 +32,44 @@ impl AddCommand {
     
     /// Execute the add command
     pub fn execute(&self) -> Result<()> {
-        // Open the repository
-        let repo = Repository::open(&self.repo_path)?;
-        
-        // Get the working directory path
-        let work_dir = repo.workdir()
-            .ok_or_else(|| GitError::Repository("Cannot add files in a bare repository".to_string()))?;
-            
-        // Process paths to add
+        // Open the gitoxide repository instance
+        let repo = GixRepository::open(&self.repo_path)
+            .map_err(|e| GitError::Repository(format!("Failed to open gitoxide repository: {}", e), Some(self.repo_path.clone())))?;
+
+        // Get mutable access to the index file
+        let mut index = repo.index_mut()?;
+
+        // Define add options
+        let options = AddOptions::default(); // Use default options for now
+        let mut progress = progress::Discard; // TODO: Implement progress
+
         if self.all {
-            println!("Adding all changes to the index");
-            // TODO: Recursively find and add all changes in the working directory
+            println!("Adding all changes to the index...");
+            // Use add_all to stage everything (new, modified, deleted)
+            index.add_all(&repo, &interrupt::IS_INTERRUPTED, &mut progress, options)
+                .map_err(|e| GitError::Repository(format!("Failed to add all changes: {}", e), Some(self.repo_path.clone())))?;
+            println!("Staged all changes.");
         } else if self.paths.is_empty() {
-            return Err(GitError::Repository("No paths specified".to_string()));
+            return Err(GitError::InvalidArgument("No paths specified to add.".to_string()));
         } else {
-            for path in &self.paths {
-                let relative_path = if path.is_absolute() {
-                    match path.strip_prefix(&work_dir) {
-                        Ok(rel) => rel.to_path_buf(),
-                        Err(_) => path.clone(),
-                    }
-                } else {
-                    path.clone()
-                };
-                
-                println!("Adding file: {}", relative_path.display());
-                
-                // TODO: In a real implementation, we would:
-                // 1. Read the file contents
-                // 2. Create a blob object for the file
-                // 3. Update the index with the new blob ID
-            }
+            println!("Adding specified paths to the index...");
+            // Add specific paths
+            // Note: add_by_path expects paths relative to the workdir root.
+            // We assume the input paths are already relative or handle absolute paths if needed.
+            let results = index.add_by_path(&self.paths, options, &repo.objects)?;
+            // TODO: Check results for potential errors per path?
+            // For now, assume success if no error was returned overall.
+            println!("Staged {} paths.", self.paths.len());
         }
-        
-        println!("Changes staged for commit");
-        
+
+        // Write the updated index back to disk
+        index.write(gix::index::write::Options::default())
+            .map_err(|e| GitError::Repository(format!("Failed to write index: {}", e), Some(self.repo_path.clone())))?;
+
+        println!("Changes staged successfully.");
         Ok(())
     }
+}
+
+// Helper functions add_file_to_index and remove_file_from_index are no longer needed.
 }
